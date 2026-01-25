@@ -103,7 +103,7 @@ class TorqueVectoringUI:
             left_frame,
             from_=100,
             to=0,
-            resolution=1,
+            resolution=0.1,
             variable=self.left_torque,
             orient=tk.VERTICAL,
             length=200,
@@ -136,7 +136,7 @@ class TorqueVectoringUI:
             right_frame,
             from_=100,
             to=0,
-            resolution=1,
+            resolution=0.1,
             variable=self.right_torque,
             orient=tk.VERTICAL,
             length=200,
@@ -286,7 +286,7 @@ class TorqueVectoringUI:
 
         # Pack torque into 2 bytes (signed 16-bit, little-endian)
         # NOTE: If your motor expects a different scaling, adjust conversion/scaling here.
-        data = struct.pack("<h", int(torque / 10))
+        data = struct.pack("<h", int(torque * 10))
         msg = can.Message(arbitration_id=motor_id, data=data, is_extended_id=False)
         try:
             self.bus.send(msg)
