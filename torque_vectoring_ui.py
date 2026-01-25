@@ -21,15 +21,17 @@ class TorqueVectoringUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Motor Control Test")
-        self.root.geometry("1200x700")
+        self.root.geometry("900x700")
         self.root.configure(bg="#f0f0f0")
 
         # Style
         style = ttk.Style()
+        style.theme_use("clam")
         style.configure("TLabel", font=("Arial", 12), background="#f0f0f0")
         style.configure("TButton", font=("Arial", 10))
         style.configure("TFrame", background="#f0f0f0")
         style.configure("Green.Vertical.TProgressbar", background="green")
+        style.configure("SwitchStatus.TLabel", font=("Arial", 12, "bold"))
 
         # CAN bus initialization
         try:
@@ -62,6 +64,8 @@ class TorqueVectoringUI:
         # Packet ID for General Data 3 (temperatures) is 0x22
         self.SET_CURRENT_PACKET_ID = 0x05
         self.GENERAL_DATA_3_PACKET_ID = 0x22
+        # Switch status CAN ID (from your screenshot)
+        self.SWITCH_STATUS_CAN_ID = 0x750
         self.left_node_id = tk.StringVar(value="4")
         self.right_node_id = tk.StringVar(value="25")
 
@@ -93,6 +97,11 @@ class TorqueVectoringUI:
         status_frame = ttk.Frame(root)
         status_frame.pack(pady=10, padx=10, fill="x")
 
+        # Switch variables
+        self.shutdown_switch = tk.BooleanVar(value=False)
+        self.ignition_switch = tk.BooleanVar(value=False)
+        self.r2d_switch = tk.BooleanVar(value=False)
+
         # Left Motor Slider
         left_frame = ttk.Frame(sliders_frame)
         left_frame.pack(side="left", expand=True, padx=30)
@@ -116,6 +125,64 @@ class TorqueVectoringUI:
         ttk.Label(left_frame, textvariable=self.left_torque, font=("Arial", 16, "bold"), foreground="blue").pack()
         ttk.Label(left_frame, text="%", font=("Arial", 12)).pack()
 
+        # Center switches
+        switch_frame = ttk.Frame(sliders_frame)
+        switch_frame.pack(side="left", expand=True, padx=30)
+
+        ttk.Label(switch_frame, text="Switches", font=("Arial", 14, "bold")).pack(pady=5)
+        shutdown_row = ttk.Frame(switch_frame)
+        shutdown_row.pack(pady=6, fill="x")
+        self.shutdown_button = ttk.Button(
+            shutdown_row,
+            text="Shutdown",
+            command=lambda: self.toggle_switch(self.shutdown_switch),
+            width=12,
+        )
+        self.shutdown_button.pack(side="left", padx=(0, 10))
+        self.shutdown_status = ttk.Label(
+            shutdown_row,
+            text="OFF",
+            style="SwitchStatus.TLabel",
+            foreground="red",
+        )
+        self.shutdown_status.pack(side="left")
+
+        ignition_row = ttk.Frame(switch_frame)
+        ignition_row.pack(pady=6, fill="x")
+        self.ignition_button = ttk.Button(
+            ignition_row,
+            text="Ignition",
+            command=lambda: self.toggle_switch(self.ignition_switch),
+            width=12,
+        )
+        self.ignition_button.pack(side="left", padx=(0, 10))
+        self.ignition_status = ttk.Label(
+            ignition_row,
+            text="OFF",
+            style="SwitchStatus.TLabel",
+            foreground="red",
+        )
+        self.ignition_status.pack(side="left")
+
+        r2d_row = ttk.Frame(switch_frame)
+        r2d_row.pack(pady=6, fill="x")
+        self.r2d_button = ttk.Button(
+            r2d_row,
+            text="R2D",
+            command=lambda: self.toggle_switch(self.r2d_switch),
+            width=12,
+        )
+        self.r2d_button.pack(side="left", padx=(0, 10))
+        self.r2d_status = ttk.Label(
+            r2d_row,
+            text="OFF",
+            style="SwitchStatus.TLabel",
+            foreground="red",
+        )
+        self.r2d_status.pack(side="left")
+
+        self.update_switch_styles()
+
         # Left Motor Temperatures
         temp_left_frame = ttk.Frame(left_frame)
         temp_left_frame.pack(pady=10)
@@ -128,7 +195,7 @@ class TorqueVectoringUI:
 
         # Right Motor Slider
         right_frame = ttk.Frame(sliders_frame)
-        right_frame.pack(side="right", expand=True, padx=30)
+        right_frame.pack(side="left", expand=True, padx=30)
         
         ttk.Label(right_frame, text="Right Motor", font=("Arial", 14, "bold")).pack(pady=5)
         
@@ -179,16 +246,9 @@ class TorqueVectoringUI:
             button_frame, text="Send Once", command=self.send_torques
         ).grid(row=0, column=0, padx=10, pady=10)
 
-        # Continuous send buttons
-        ttk.Button(
-            button_frame, text="Start Continuous Send", command=self.start_continuous
-        ).grid(row=0, column=1, padx=10, pady=10)
-        ttk.Button(
-            button_frame, text="Stop Continuous Send", command=self.stop_continuous
-        ).grid(row=0, column=2, padx=10, pady=10)
         ttk.Button(
             button_frame, text="Reset to Zero", command=self.reset_sliders
-        ).grid(row=0, column=3, padx=10, pady=10)
+        ).grid(row=0, column=1, padx=10, pady=10)
 
         # Status
         ttk.Label(status_frame, text="CAN Status:", font=("Arial", 12)).grid(
@@ -214,14 +274,22 @@ class TorqueVectoringUI:
         )
         self.ros2_status_label.grid(row=0, column=3, padx=10, pady=5, sticky="w")
 
-        # Start continuous thread
-        self.running = False
-        self.thread = None
+        # Torque send loop (always running, gated by switches)
+        self.torque_send_interval_ms = 100
+        self.torque_after_id = None
 
         # Start CAN receive thread for temperatures
         self.receiving = True
         self.receive_thread = threading.Thread(target=self.can_receive_loop, daemon=True)
         self.receive_thread.start()
+
+        # Start torque send loop
+        self.schedule_torque_send()
+
+        # Start switch status send loop (always sending)
+        self.switch_send_interval_ms = 100
+        self.switch_after_id = None
+        self.schedule_switch_send()
 
     def can_receive_loop(self):
         """Thread to receive CAN messages and update temperatures"""
@@ -272,10 +340,57 @@ class TorqueVectoringUI:
             self.pub_left_torque.publish(Float32(data=self.left_torque.get()))
             self.pub_right_torque.publish(Float32(data=self.right_torque.get()))
 
+    def toggle_switch(self, var):
+        var.set(not var.get())
+        self.update_switch_styles()
+
+    def update_switch_styles(self):
+        self.shutdown_status.configure(
+            text="ON" if self.shutdown_switch.get() else "OFF",
+            foreground="green" if self.shutdown_switch.get() else "red",
+        )
+        self.ignition_status.configure(
+            text="ON" if self.ignition_switch.get() else "OFF",
+            foreground="green" if self.ignition_switch.get() else "red",
+        )
+        self.r2d_status.configure(
+            text="ON" if self.r2d_switch.get() else "OFF",
+            foreground="green" if self.r2d_switch.get() else "red",
+        )
+
+    def send_switch_status(self):
+        if self.bus is None:
+            return
+
+        data = bytearray(8)
+        data[0] = 1 if self.ignition_switch.get() else 0
+        data[1] = 1 if self.r2d_switch.get() else 0
+        data[2] = 1 if self.shutdown_switch.get() else 0
+
+        msg = can.Message(
+            arbitration_id=self.SWITCH_STATUS_CAN_ID,
+            data=bytes(data),
+            is_extended_id=False,
+        )
+        try:
+            self.bus.send(msg)
+        except Exception as e:
+            print(f"Error sending switch status: {e}")
+
+    def schedule_switch_send(self):
+        self.send_switch_status()
+        self.switch_after_id = self.root.after(
+            self.switch_send_interval_ms, self.schedule_switch_send
+        )
+
     def reset_sliders(self):
         """Reset both sliders to zero"""
         self.left_torque.set(0.0)
         self.right_torque.set(0.0)
+        self.shutdown_switch.set(False)
+        self.ignition_switch.set(False)
+        self.r2d_switch.set(False)
+        self.update_switch_styles()
         self.update_display()
 
     def send_can_message(self, torque, motor_id):
@@ -304,6 +419,8 @@ class TorqueVectoringUI:
 
     def send_torques(self):
         """Send current slider values via CAN"""
+        if not (self.shutdown_switch.get() and self.ignition_switch.get() and self.r2d_switch.get()):
+            return
         # Get Node IDs and calculate CAN IDs for Set Current (0x05)
         left_node = int(self.left_node_id.get())
         right_node = int(self.right_node_id.get())
@@ -317,24 +434,17 @@ class TorqueVectoringUI:
         self.send_can_message(self.left_torque.get(), left_can_id)
         self.send_can_message(self.right_torque.get(), right_can_id)
 
-    def continuous_send_loop(self):
-        while self.running:
-            self.send_torques()
-            time.sleep(0.1)  # 10 Hz
-
-    def start_continuous(self):
-        if not self.running:
-            self.running = True
-            self.thread = threading.Thread(target=self.continuous_send_loop)
-            self.thread.start()
-
-    def stop_continuous(self):
-        self.running = False
-        if self.thread:
-            self.thread.join()
+    def schedule_torque_send(self):
+        self.send_torques()
+        self.torque_after_id = self.root.after(
+            self.torque_send_interval_ms, self.schedule_torque_send
+        )
 
     def on_closing(self):
-        self.stop_continuous()
+        if self.torque_after_id is not None:
+            self.root.after_cancel(self.torque_after_id)
+        if self.switch_after_id is not None:
+            self.root.after_cancel(self.switch_after_id)
         self.receiving = False
         if self.receive_thread:
             self.receive_thread.join(timeout=1)
