@@ -29,3 +29,6 @@ python torque_vectoring_ui.py
 - DBC sending is enabled when a DBC file is loaded; `cantools` is already in requirements.
 - If no CAN hardware is connected, the app will show "CAN Disconnected" and skip sending; you can still explore the UI.
 - Adjust the CAN channel/interface in `torque_vectoring_ui.py` if your setup differs (e.g., non-`can0` name).
+
+ls /dev/ttyACM*
+sudo modprobe can && sudo modprobe can_raw && sudo slcand -o -c -s8 /dev/ttyACM0 can0 && sudo ip link set can0 up && sudo ip link set can0 txqueuelen 1000

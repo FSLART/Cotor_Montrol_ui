@@ -11,7 +11,7 @@ sudo modprobe can
 sudo modprobe can_raw
 #sudo modprobe slcan
 sudo slcand -o -c -s8 "$USB_CAN_DEVICE" can0
-sudo ifconfig can0 txqueuelen 1000
 sudo ip link set can0 up
+sudo ifconfig can0 txqueuelen 1000
 
 

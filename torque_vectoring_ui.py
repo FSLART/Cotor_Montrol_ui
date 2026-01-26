@@ -21,7 +21,7 @@ class TorqueVectoringUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Motor Control Test")
-        self.root.geometry("900x700")
+        self.root.geometry("675x700")
         self.root.configure(bg="#f0f0f0")
 
         # Style
@@ -35,7 +35,7 @@ class TorqueVectoringUI:
 
         # CAN bus initialization
         try:
-            self.bus = can.interface.Bus(channel="vcan0", interface="socketcan")
+            self.bus = can.interface.Bus(channel="can0", interface="socketcan")
             self.can_status = "CAN Connected"
         except Exception as e:
             print(f"Error initializing CAN bus: {e}")
@@ -49,15 +49,12 @@ class TorqueVectoringUI:
             self.pub_left_torque = self.node.create_publisher(
                 Float32, "left_motor_torque", 10
             )
-            self.pub_right_torque = self.node.create_publisher(
-                Float32, "right_motor_torque", 10
-            )
         else:
             self.node = None
 
         # Variables - direct motor control (0-100%)
         self.left_torque = tk.DoubleVar(value=0.0)
-        self.right_torque = tk.DoubleVar(value=0.0)
+        self.horizontal_torque = tk.DoubleVar(value=0.0)
 
         # Node ID variables (CAN ID will be calculated: CAN_ID = (Packet_ID << 5) | Node_ID)
         # Packet ID for Set Current is 0x05
@@ -66,14 +63,12 @@ class TorqueVectoringUI:
         self.GENERAL_DATA_3_PACKET_ID = 0x22
         # Switch status CAN ID (from your screenshot)
         self.SWITCH_STATUS_CAN_ID = 0x750
+        self.PUMP_SPEED_CAN_ID = 0x751
         self.left_node_id = tk.StringVar(value="4")
-        self.right_node_id = tk.StringVar(value="25")
 
         # Temperature variables
         self.left_controller_temp = tk.StringVar(value="--")
         self.left_motor_temp = tk.StringVar(value="--")
-        self.right_controller_temp = tk.StringVar(value="--")
-        self.right_motor_temp = tk.StringVar(value="--")
 
         # Title
         title_label = ttk.Label(
@@ -88,14 +83,11 @@ class TorqueVectoringUI:
         sliders_frame = ttk.Frame(root)
         sliders_frame.pack(pady=20, padx=10, fill="both", expand=True)
 
+        # Horizontal slider frame will be packed later after sliders_frame content
+
         can_id_frame = ttk.Frame(root)
-        can_id_frame.pack(pady=10, padx=10, fill="x")
-
         button_frame = ttk.Frame(root)
-        button_frame.pack(pady=10, padx=10, fill="x")
-
         status_frame = ttk.Frame(root)
-        status_frame.pack(pady=10, padx=10, fill="x")
 
         # Switch variables
         self.shutdown_switch = tk.BooleanVar(value=False)
@@ -183,9 +175,29 @@ class TorqueVectoringUI:
 
         self.update_switch_styles()
 
-        # Left Motor Temperatures
-        temp_left_frame = ttk.Frame(left_frame)
-        temp_left_frame.pack(pady=10)
+        # Horizontal Slider Frame
+        horizontal_frame = ttk.Frame(root)
+        horizontal_frame.pack(pady=10, padx=10, fill="x")
+        
+        ttk.Label(horizontal_frame, text="Pump Speed:", font=("Arial", 12)).pack(side="left", padx=(10, 20))
+        
+        self.horizontal_slider = tk.Scale(
+            horizontal_frame,
+            from_=0,
+            to=100,
+            resolution=1,
+            variable=self.horizontal_torque,
+            orient=tk.HORIZONTAL,
+            length=400,
+            width=20,
+            font=("Arial", 10),
+            command=lambda _: self.update_display(),
+        )
+        self.horizontal_slider.pack(side="left", pady=5)
+
+        # Left Motor Temperatures (next to horizontal slider)
+        temp_left_frame = ttk.Frame(horizontal_frame)
+        temp_left_frame.pack(side="left", padx=(30, 10))
         ttk.Label(temp_left_frame, text="Inverter:", font=("Arial", 10)).grid(row=0, column=0, sticky="e")
         ttk.Label(temp_left_frame, textvariable=self.left_controller_temp, font=("Arial", 10, "bold"), foreground="red").grid(row=0, column=1, sticky="w")
         ttk.Label(temp_left_frame, text="°C", font=("Arial", 10)).grid(row=0, column=2, sticky="w")
@@ -193,38 +205,10 @@ class TorqueVectoringUI:
         ttk.Label(temp_left_frame, textvariable=self.left_motor_temp, font=("Arial", 10, "bold"), foreground="orange").grid(row=1, column=1, sticky="w")
         ttk.Label(temp_left_frame, text="°C", font=("Arial", 10)).grid(row=1, column=2, sticky="w")
 
-        # Right Motor Slider
-        right_frame = ttk.Frame(sliders_frame)
-        right_frame.pack(side="left", expand=True, padx=30)
-        
-        ttk.Label(right_frame, text="Right Motor", font=("Arial", 14, "bold")).pack(pady=5)
-        
-        self.right_slider = tk.Scale(
-            right_frame,
-            from_=100,
-            to=0,
-            resolution=0.1,
-            variable=self.right_torque,
-            orient=tk.VERTICAL,
-            length=200,
-            width=40,
-            font=("Arial", 12),
-            command=lambda _: self.update_display(),
-        )
-        self.right_slider.pack(pady=10)
-        
-        ttk.Label(right_frame, textvariable=self.right_torque, font=("Arial", 16, "bold"), foreground="blue").pack()
-        ttk.Label(right_frame, text="%", font=("Arial", 12)).pack()
-
-        # Right Motor Temperatures
-        temp_right_frame = ttk.Frame(right_frame)
-        temp_right_frame.pack(pady=10)
-        ttk.Label(temp_right_frame, text="Inverter:", font=("Arial", 10)).grid(row=0, column=0, sticky="e")
-        ttk.Label(temp_right_frame, textvariable=self.right_controller_temp, font=("Arial", 10, "bold"), foreground="red").grid(row=0, column=1, sticky="w")
-        ttk.Label(temp_right_frame, text="°C", font=("Arial", 10)).grid(row=0, column=2, sticky="w")
-        ttk.Label(temp_right_frame, text="Motor:", font=("Arial", 10)).grid(row=1, column=0, sticky="e")
-        ttk.Label(temp_right_frame, textvariable=self.right_motor_temp, font=("Arial", 10, "bold"), foreground="orange").grid(row=1, column=1, sticky="w")
-        ttk.Label(temp_right_frame, text="°C", font=("Arial", 10)).grid(row=1, column=2, sticky="w")
+        # Now pack the remaining frames in correct order
+        can_id_frame.pack(pady=10, padx=10, fill="x")
+        button_frame.pack(pady=10, padx=10, fill="x")
+        status_frame.pack(pady=10, padx=10, fill="x")
 
         # Node ID Configuration (CAN ID = (Packet_ID << 5) | Node_ID)
         ttk.Label(can_id_frame, text="Left Motor Node ID:", font=("Arial", 12)).grid(
@@ -233,13 +217,6 @@ class TorqueVectoringUI:
         ttk.Entry(
             can_id_frame, textvariable=self.left_node_id, font=("Arial", 12), width=10
         ).grid(row=0, column=1, padx=10, pady=5, sticky="w")
-
-        ttk.Label(can_id_frame, text="Right Motor Node ID:", font=("Arial", 12)).grid(
-            row=0, column=2, padx=10, pady=5, sticky="w"
-        )
-        ttk.Entry(
-            can_id_frame, textvariable=self.right_node_id, font=("Arial", 12), width=10
-        ).grid(row=0, column=3, padx=10, pady=5, sticky="w")
 
         # Button Elements
         ttk.Button(
@@ -323,14 +300,10 @@ class TorqueVectoringUI:
             # Check which motor this belongs to
             try:
                 left_node = int(self.left_node_id.get())
-                right_node = int(self.right_node_id.get())
                 
                 if node_id == left_node:
                     self.left_controller_temp.set(f"{controller_temp:.1f}")
                     self.left_motor_temp.set(f"{motor_temp:.1f}")
-                elif node_id == right_node:
-                    self.right_controller_temp.set(f"{controller_temp:.1f}")
-                    self.right_motor_temp.set(f"{motor_temp:.1f}")
             except ValueError:
                 pass
 
@@ -338,7 +311,6 @@ class TorqueVectoringUI:
         """Update display and publish to ROS2"""
         if ROS2_AVAILABLE and self.node:
             self.pub_left_torque.publish(Float32(data=self.left_torque.get()))
-            self.pub_right_torque.publish(Float32(data=self.right_torque.get()))
 
     def toggle_switch(self, var):
         var.set(not var.get())
@@ -377,6 +349,19 @@ class TorqueVectoringUI:
         except Exception as e:
             print(f"Error sending switch status: {e}")
 
+        # Send pump speed on CAN ID 0x751
+        pump_data = bytearray(8)
+        pump_data[0] = int(self.horizontal_torque.get())
+        pump_msg = can.Message(
+            arbitration_id=self.PUMP_SPEED_CAN_ID,
+            data=bytes(pump_data),
+            is_extended_id=False,
+        )
+        try:
+            self.bus.send(pump_msg)
+        except Exception as e:
+            print(f"Error sending pump speed: {e}")
+
     def schedule_switch_send(self):
         self.send_switch_status()
         self.switch_after_id = self.root.after(
@@ -384,9 +369,9 @@ class TorqueVectoringUI:
         )
 
     def reset_sliders(self):
-        """Reset both sliders to zero"""
+        """Reset slider to zero"""
         self.left_torque.set(0.0)
-        self.right_torque.set(0.0)
+        self.horizontal_torque.set(0.0)
         self.shutdown_switch.set(False)
         self.ignition_switch.set(False)
         self.r2d_switch.set(False)
@@ -401,7 +386,7 @@ class TorqueVectoringUI:
 
         # Pack torque into 2 bytes (signed 16-bit, little-endian)
         # NOTE: If your motor expects a different scaling, adjust conversion/scaling here.
-        data = struct.pack("<h", int(torque * 10))
+        data = struct.pack("<h", int(torque / 10))
         msg = can.Message(arbitration_id=motor_id, data=data, is_extended_id=False)
         try:
             self.bus.send(msg)
@@ -418,21 +403,17 @@ class TorqueVectoringUI:
         return (packet_id << 5) | node_id
 
     def send_torques(self):
-        """Send current slider values via CAN"""
+        """Send current slider value via CAN"""
         if not (self.shutdown_switch.get() and self.ignition_switch.get() and self.r2d_switch.get()):
             return
-        # Get Node IDs and calculate CAN IDs for Set Current (0x05)
+        # Get Node ID and calculate CAN ID for Set Current (0x05)
         left_node = int(self.left_node_id.get())
-        right_node = int(self.right_node_id.get())
         
         left_can_id = self.node_id_to_can_id(left_node, self.SET_CURRENT_PACKET_ID)
-        right_can_id = self.node_id_to_can_id(right_node, self.SET_CURRENT_PACKET_ID)
         
         print(f"Left: Node ID {left_node} -> CAN ID {hex(left_can_id)}")
-        print(f"Right: Node ID {right_node} -> CAN ID {hex(right_can_id)}")
         
         self.send_can_message(self.left_torque.get(), left_can_id)
-        self.send_can_message(self.right_torque.get(), right_can_id)
 
     def schedule_torque_send(self):
         self.send_torques()
