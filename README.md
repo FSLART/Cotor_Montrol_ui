@@ -31,4 +31,6 @@ python torque_vectoring_ui.py
 - Adjust the CAN channel/interface in `torque_vectoring_ui.py` if your setup differs (e.g., non-`can0` name).
 
 ls /dev/ttyACM*
+
+ls /dev/ttyACM*
 sudo modprobe can && sudo modprobe can_raw && sudo slcand -o -c -s8 /dev/ttyACM0 can0 && sudo ip link set can0 up && sudo ip link set can0 txqueuelen 1000

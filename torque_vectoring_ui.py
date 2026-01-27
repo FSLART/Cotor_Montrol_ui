@@ -289,10 +289,10 @@ class TorqueVectoringUI:
         
         # Check if this is a General Data 3 message (0x22) - temperatures
         if packet_id == self.GENERAL_DATA_3_PACKET_ID and len(msg.data) >= 4:
-            # Bytes 0-1: Controller temperature (signed 16-bit, little-endian, scale 10)
-            # Bytes 2-3: Motor temperature (signed 16-bit, little-endian, scale 10)
-            controller_temp_raw = struct.unpack("<h", msg.data[0:2])[0]
-            motor_temp_raw = struct.unpack("<h", msg.data[2:4])[0]
+            # Bytes 0-1: Controller temperature (signed 16-bit, big-endian, scale 10)
+            # Bytes 2-3: Motor temperature (signed 16-bit, big-endian, scale 10)
+            controller_temp_raw = struct.unpack(">h", msg.data[0:2])[0]
+            motor_temp_raw = struct.unpack(">h", msg.data[2:4])[0]
             
             controller_temp = controller_temp_raw / 10.0
             motor_temp = motor_temp_raw / 10.0
