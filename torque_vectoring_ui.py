@@ -21,7 +21,7 @@ class TorqueVectoringUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Motor Control Test")
-        self.root.geometry("675x700")
+        self.root.geometry("740x750")
         self.root.configure(bg="#f0f0f0")
 
         # Style
@@ -60,11 +60,17 @@ class TorqueVectoringUI:
         # Packet ID for Set Current is 0x05
         # Packet ID for General Data 3 (temperatures) is 0x22
         self.SET_CURRENT_PACKET_ID = 0x05
-        self.GENERAL_DATA_3_PACKET_ID = 0x22
+        self.GENERAL_DATA_3_PACKET_ID = 0x752
         # Switch status CAN ID (from your screenshot)
         self.SWITCH_STATUS_CAN_ID = 0x750
         self.PUMP_SPEED_CAN_ID = 0x751
         self.left_node_id = tk.StringVar(value="4")
+
+        # Input voltage display (user will populate CAN read logic)
+        self.input_voltage = tk.StringVar(value="--")
+
+        # VCU State display
+        self.vcu_state = tk.StringVar(value="--")
 
         # Temperature variables
         self.left_controller_temp = tk.StringVar(value="--")
@@ -119,7 +125,7 @@ class TorqueVectoringUI:
 
         # Center switches
         switch_frame = ttk.Frame(sliders_frame)
-        switch_frame.pack(side="left", expand=True, padx=30)
+        switch_frame.pack(side="left", expand=True, padx=50)
 
         ttk.Label(switch_frame, text="Switches", font=("Arial", 14, "bold")).pack(pady=5)
         shutdown_row = ttk.Frame(switch_frame)
@@ -175,6 +181,22 @@ class TorqueVectoringUI:
 
         self.update_switch_styles()
 
+        # Status box under switches: Input Voltage and VCU State
+        status_box = ttk.Frame(switch_frame)
+        status_box.pack(pady=20)
+        ttk.Label(status_box, text="Status", font=("Arial", 14, "bold")).pack(pady=(0,6))
+
+        status_row = ttk.Frame(status_box)
+        status_row.pack(pady=2, fill="x")
+        ttk.Label(status_row, text="Input Voltage:", font=("Arial", 12)).pack(side="left")
+        ttk.Label(status_row, textvariable=self.input_voltage, font=("Arial", 12, "bold"), foreground="red").pack(side="left", padx=(6,6))
+        ttk.Label(status_row, text="V", font=("Arial", 12)).pack(side="left")
+
+        vcu_row = ttk.Frame(status_box)
+        vcu_row.pack(pady=2, fill="x")
+        ttk.Label(vcu_row, text="VCU State:", font=("Arial", 12)).pack(side="left")
+        ttk.Label(vcu_row, textvariable=self.vcu_state, font=("Arial", 12, "bold")).pack(side="left", padx=(6,6))
+
         # Horizontal Slider Frame
         horizontal_frame = ttk.Frame(root)
         horizontal_frame.pack(pady=10, padx=10, fill="x")
@@ -204,11 +226,12 @@ class TorqueVectoringUI:
         ttk.Label(temp_left_frame, text="Motor:", font=("Arial", 10)).grid(row=1, column=0, sticky="e")
         ttk.Label(temp_left_frame, textvariable=self.left_motor_temp, font=("Arial", 10, "bold"), foreground="orange").grid(row=1, column=1, sticky="w")
         ttk.Label(temp_left_frame, text="°C", font=("Arial", 10)).grid(row=1, column=2, sticky="w")
+        
 
         # Now pack the remaining frames in correct order
-        can_id_frame.pack(pady=10, padx=10, fill="x")
-        button_frame.pack(pady=10, padx=10, fill="x")
-        status_frame.pack(pady=10, padx=10, fill="x")
+        can_id_frame.pack(pady=20, padx=10, fill="x")
+        button_frame.pack(pady=20, padx=10, fill="x")
+        status_frame.pack(pady=20, padx=10, fill="x")
 
         # Node ID Configuration (CAN ID = (Packet_ID << 5) | Node_ID)
         ttk.Label(can_id_frame, text="Left Motor Node ID:", font=("Arial", 12)).grid(
@@ -217,7 +240,8 @@ class TorqueVectoringUI:
         ttk.Entry(
             can_id_frame, textvariable=self.left_node_id, font=("Arial", 12), width=10
         ).grid(row=0, column=1, padx=10, pady=5, sticky="w")
-
+        
+        
         # Button Elements
         ttk.Button(
             button_frame, text="Send Once", command=self.send_torques
@@ -251,6 +275,8 @@ class TorqueVectoringUI:
         )
         self.ros2_status_label.grid(row=0, column=3, padx=10, pady=5, sticky="w")
 
+        
+
         # Torque send loop (always running, gated by switches)
         self.torque_send_interval_ms = 100
         self.torque_after_id = None
@@ -283,9 +309,25 @@ class TorqueVectoringUI:
 
     def process_can_message(self, msg):
         """Process received CAN message and extract temperatures"""
+        # (debug indicator removed)
         # Extract Node ID and Packet ID from CAN ID
         node_id = msg.arbitration_id & 0x1F
         packet_id = msg.arbitration_id >> 5
+        # Try read configured left node ID for filtering (used for temperatures and voltage)
+        try:
+            left_node = int(self.left_node_id.get())
+        except ValueError:
+            left_node = None
+
+        # Check for input voltage message with Packet ID 0x20 (bytes 6-7)
+        # Expecting voltage in bytes 6-7 as unsigned 16-bit (big-endian), scaled by 1
+        if packet_id == 0x20 and left_node is not None and node_id == left_node and len(msg.data) >= 8:
+            try:
+                raw = struct.unpack(">h", msg.data[6:8])[0]
+                self.set_input_voltage(raw)
+            except Exception:
+                # On parse error, clear the display but don't spam the console
+                self.input_voltage.set("--")
         
         # Check if this is a General Data 3 message (0x22) - temperatures
         if packet_id == self.GENERAL_DATA_3_PACKET_ID and len(msg.data) >= 4:
@@ -297,15 +339,72 @@ class TorqueVectoringUI:
             controller_temp = controller_temp_raw / 10.0
             motor_temp = motor_temp_raw / 10.0
             
-            # Check which motor this belongs to
+            # Check which motor this belongs to (temperatures still filtered by node)
+            if left_node is not None and node_id == left_node:
+                self.left_controller_temp.set(f"{controller_temp:.1f}")
+                self.left_motor_temp.set(f"{motor_temp:.1f}")
+        # Do not filter by node id — per request, VCU state comes from any message with packet 0x22
+        # Accept messages where packet_id == 0x22 OR raw arbitration id == 0x22
+        if (packet_id == self.GENERAL_DATA_3_PACKET_ID or msg.arbitration_id == self.GENERAL_DATA_3_PACKET_ID) and len(msg.data) >= 5:
             try:
-                left_node = int(self.left_node_id.get())
-                
-                if node_id == left_node:
-                    self.left_controller_temp.set(f"{controller_temp:.1f}")
-                    self.left_motor_temp.set(f"{motor_temp:.1f}")
-            except ValueError:
+                state_raw = int(msg.data[4])
+                self.set_vcu_state(state_raw)
+            except Exception:
+                # schedule UI update to clear value safely from any thread
+                if self.root:
+                    self.root.after(0, lambda: self.vcu_state.set("--"))
+                else:
+                    self.vcu_state.set("--")
+
+    def set_input_voltage(self, volts):
+        """Update the input voltage display. Expects a number (float or int).
+        """
+        try:
+            v = float(volts)
+            # Match temperature formatting: one decimal place
+            self.input_voltage.set(f"{v:.0f}")
+            # Ensure UI refresh
+            try:
+                self.root.update_idletasks()
+            except Exception:
                 pass
+        except (ValueError, TypeError):
+            self.input_voltage.set("--")
+
+    def set_vcu_state(self, state):
+        """Set VCU state display from an integer code.
+
+        Mapping follows the provided enum (0..8).
+        """
+        try:
+            s = int(state)
+        except (ValueError, TypeError):
+            self.vcu_state.set("--")
+            return
+
+        mapping = {
+            0: "   Initializing",
+            1: "       Shutdown",
+            2: "        Standby",
+            3: "      Precharge",
+            4: "Waiting for R2D",
+            5: "Waiting for R2D (Auto)",
+            6: "  Ready 2 Drive",
+            7: "Ready (Autonomous)",
+            8: "Emergency",
+        }
+
+        text = mapping.get(s)
+        display = text if text is not None else "--"
+
+        # Update UI safely from any thread
+        if self.root:
+            try:
+                self.root.after(0, lambda: self.vcu_state.set(display))
+            except Exception:
+                self.vcu_state.set(display)
+        else:
+            self.vcu_state.set(display)
 
     def update_display(self):
         """Update display and publish to ROS2"""
