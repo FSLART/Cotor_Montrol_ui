@@ -60,7 +60,7 @@ class TorqueVectoringUI:
         # Packet ID for Set Current is 0x05
         # Packet ID for General Data 3 (temperatures) is 0x22
         self.SET_CURRENT_PACKET_ID = 0x05
-        self.GENERAL_DATA_3_PACKET_ID = 0x752
+        self.GENERAL_DATA_3_PACKET_ID = 0x22
         # Switch status CAN ID (from your screenshot)
         self.SWITCH_STATUS_CAN_ID = 0x750
         self.PUMP_SPEED_CAN_ID = 0x751
@@ -345,7 +345,7 @@ class TorqueVectoringUI:
                 self.left_motor_temp.set(f"{motor_temp:.1f}")
         # Do not filter by node id — per request, VCU state comes from any message with packet 0x22
         # Accept messages where packet_id == 0x22 OR raw arbitration id == 0x22
-        if (packet_id == self.GENERAL_DATA_3_PACKET_ID or msg.arbitration_id == self.GENERAL_DATA_3_PACKET_ID) and len(msg.data) >= 5:
+        if (msg.arbitration_id == 0x752) and len(msg.data) >= 5:
             try:
                 state_raw = int(msg.data[4])
                 self.set_vcu_state(state_raw)
@@ -483,9 +483,9 @@ class TorqueVectoringUI:
             self.can_status_label.config(text="Disconnected", foreground="red")
             return
 
-        # Pack torque into 2 bytes (signed 16-bit, little-endian)
-        # NOTE: If your motor expects a different scaling, adjust conversion/scaling here.
-        data = struct.pack("<h", int(torque / 10))
+        # Pack torque into 2 bytes (signed 16-bit, big-endian)
+        # NOTE: Sends value in byte1 instead of byte0.
+        data = struct.pack(">h", int(torque*10))
         msg = can.Message(arbitration_id=motor_id, data=data, is_extended_id=False)
         try:
             self.bus.send(msg)
