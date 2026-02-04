@@ -5,6 +5,8 @@ import can
 import struct
 import threading
 import time
+import csv
+import os
 
 try:
     import rclpy
@@ -21,7 +23,7 @@ class TorqueVectoringUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Motor Control Test")
-        self.root.geometry("740x750")
+        self.root.geometry("750x760")
         self.root.configure(bg="#f0f0f0")
 
         # Style
@@ -32,6 +34,7 @@ class TorqueVectoringUI:
         style.configure("TFrame", background="#f0f0f0")
         style.configure("Green.Vertical.TProgressbar", background="green")
         style.configure("SwitchStatus.TLabel", font=("Arial", 12, "bold"))
+        style.configure("Rpm.Vertical.TProgressbar", background="#00aa00", troughcolor="#e6e6e6")
 
         # CAN bus initialization
         try:
@@ -54,7 +57,27 @@ class TorqueVectoringUI:
 
         # Variables - direct motor control (0-100%)
         self.left_torque = tk.DoubleVar(value=0.0)
+        self.left_rpm_display = tk.StringVar(value="--")
         self.horizontal_torque = tk.DoubleVar(value=0.0)
+        self.left_motor_rpm = tk.IntVar(value=0)
+        self.left_rpm_valid = False
+        self.rpm_canvases = []
+        self.rpm_canvas_size = (20, 200)
+        self.auto_path = tk.StringVar(value="Endurance.csv")
+        self.auto_time = tk.StringVar(value="00:00")
+        self.auto_max_time = "00:00"
+        self.auto_throttle = tk.IntVar(value=0)
+        self.auto_rpm = tk.IntVar(value=0)
+        self.auto_bar_canvases = []
+        self.auto_mode = tk.StringVar(value="Endurance")
+        self.auto_torque = tk.DoubleVar(value=0.0)
+        self.auto_running = False
+        self.auto_paused = False
+        self.auto_after_id = None
+        self.auto_data = []
+        self.auto_index = 0
+        self.auto_start_time = None
+        self.auto_elapsed_offset = 0.0
 
         # Node ID variables (CAN ID will be calculated: CAN_ID = (Packet_ID << 5) | Node_ID)
         # Packet ID for Set Current is 0x05
@@ -64,6 +87,7 @@ class TorqueVectoringUI:
         # Switch status CAN ID (from your screenshot)
         self.SWITCH_STATUS_CAN_ID = 0x750
         self.PUMP_SPEED_CAN_ID = 0x751
+        self.MOTOR_POLE_PAIRS = 4
         self.left_node_id = tk.StringVar(value="4")
 
         # Input voltage display (user will populate CAN read logic)
@@ -100,28 +124,19 @@ class TorqueVectoringUI:
         self.ignition_switch = tk.BooleanVar(value=False)
         self.r2d_switch = tk.BooleanVar(value=False)
 
-        # Left Motor Slider
-        left_frame = ttk.Frame(sliders_frame)
-        left_frame.pack(side="left", expand=True, padx=30)
-        
-        ttk.Label(left_frame, text="Left Motor", font=("Arial", 14, "bold")).pack(pady=5)
-        
-        self.left_slider = tk.Scale(
-            left_frame,
-            from_=100,
-            to=0,
-            resolution=0.1,
-            variable=self.left_torque,
-            orient=tk.VERTICAL,
-            length=200,
-            width=40,
-            font=("Arial", 12),
-            command=lambda _: self.update_display(),
-        )
-        self.left_slider.pack(pady=10)
-        
-        ttk.Label(left_frame, textvariable=self.left_torque, font=("Arial", 16, "bold"), foreground="blue").pack()
-        ttk.Label(left_frame, text="%", font=("Arial", 12)).pack()
+        # Accelerator tabs (Left Motor Slider)
+        self.accel_notebook = ttk.Notebook(sliders_frame)
+        self.accel_notebook.pack(side="left", expand=True, padx=30)
+
+        accel_tab_1 = ttk.Frame(self.accel_notebook)
+        accel_tab_2 = ttk.Frame(self.accel_notebook)
+        self.accel_notebook.add(accel_tab_1, text="Manual Control")
+        self.accel_notebook.add(accel_tab_2, text="Auto Control")
+        self.auto_tab = accel_tab_2
+
+        self.build_accelerator_tab(accel_tab_1)
+        self.root.update_idletasks()
+        self.build_auto_tab(accel_tab_2)
 
         # Center switches
         switch_frame = ttk.Frame(sliders_frame)
@@ -294,6 +309,8 @@ class TorqueVectoringUI:
         self.switch_after_id = None
         self.schedule_switch_send()
 
+        # Demo RPM animation (preview) removed per request
+
     def can_receive_loop(self):
         """Thread to receive CAN messages and update temperatures"""
         if self.bus is None:
@@ -319,9 +336,19 @@ class TorqueVectoringUI:
         except ValueError:
             left_node = None
 
-        # Check for input voltage message with Packet ID 0x20 (bytes 6-7)
-        # Expecting voltage in bytes 6-7 as unsigned 16-bit (big-endian), scaled by 1
-        if packet_id == 0x20 and left_node is not None and node_id == left_node and len(msg.data) >= 8:
+        # Check for General Data 1 message with Packet ID 0x20
+        # Bytes 0-3: ERPM (signed 32-bit, big-endian)
+        # Bytes 6-7: Input voltage (signed 16-bit, big-endian), scaled by 1
+        if packet_id == 0x20 and len(msg.data) >= 8:
+            try:
+                erpm = struct.unpack(">i", msg.data[0:4])[0]
+                motor_rpm = int(erpm / self.MOTOR_POLE_PAIRS)
+                self.left_motor_rpm.set(abs(motor_rpm))
+                self.auto_rpm.set(abs(motor_rpm))
+                self.left_rpm_valid = True
+            except Exception:
+                self.left_rpm_valid = False
+
             try:
                 raw = struct.unpack(">h", msg.data[6:8])[0]
                 self.set_input_voltage(raw)
@@ -355,6 +382,326 @@ class TorqueVectoringUI:
                     self.root.after(0, lambda: self.vcu_state.set("--"))
                 else:
                     self.vcu_state.set("--")
+
+    def build_accelerator_tab(self, parent):
+        left_frame = ttk.Frame(parent)
+        left_frame.pack(pady=10, padx=10, fill="both", expand=True)
+
+        ttk.Label(left_frame, text="Motor", font=("Arial", 14, "bold")).pack(pady=5, anchor="w")
+        ttk.Label(left_frame, text="Throttle Position      RPM", font=("Arial", 10, "bold")).pack(pady=(0, 6), anchor="w")
+
+        slider_row = ttk.Frame(left_frame)
+        slider_row.pack(pady=10)
+
+        tk.Scale(
+            slider_row,
+            from_=100,
+            to=0,
+            resolution=0.1,
+            variable=self.left_torque,
+            orient=tk.VERTICAL,
+            length=200,
+            width=40,
+            font=("Arial", 12),
+            command=lambda _: self.update_display(),
+        ).grid(row=0, column=0, padx=(0, 8))
+
+        value_row = ttk.Frame(slider_row)
+        value_row.grid(row=0, column=3)
+        ttk.Label(value_row, text="RPM:", font=("Arial", 10, "bold")).pack(side="left", padx=(0, 6))
+        ttk.Label(
+            value_row,
+            textvariable=self.left_rpm_display,
+            font=("Arial", 16, "bold"),
+            foreground="blue",
+            width=5,
+            anchor="e",
+        ).pack(side="right")
+
+        # RPM indicator (0-20000)
+        rpm_frame = ttk.Frame(slider_row)
+        rpm_frame.grid(row=0, column=2, padx=(40, 0))
+        #ttk.Label(rpm_frame, text="RPM", font=("Arial", 10, "bold")).grid(row=0, column=0, columnspan=2, pady=(0, 4))
+        ttk.Label(rpm_frame, text="20000", font=("Arial", 9)).grid(row=1, column=1, sticky="n", padx=(6, 0))
+        canvas_width, canvas_height = self.rpm_canvas_size
+        rpm_canvas = tk.Canvas(
+            rpm_frame,
+            width=canvas_width,
+            height=canvas_height,
+            highlightthickness=0,
+            bg="#e6e6e6",
+        )
+        rpm_canvas.grid(row=1, column=0)
+
+        # Solid bar matching the RPM text color
+        for y in range(canvas_height):
+            rpm_canvas.create_line(0, y, canvas_width, y, fill="blue")
+
+        # Mask for empty portion (updated with RPM)
+        mask_id = rpm_canvas.create_rectangle(
+            0,
+            0,
+            canvas_width,
+            canvas_height,
+            fill="#e6e6e6",
+            outline="",
+        )
+        self.rpm_canvases.append((rpm_canvas, mask_id, self.left_motor_rpm, 20000))
+        ttk.Label(rpm_frame, text="0", font=("Arial", 9)).grid(row=1, column=1, sticky="s", padx=(6, 0))
+
+    def build_auto_tab(self, parent):
+        parent.columnconfigure(0, weight=1)
+        parent.columnconfigure(1, weight=1)
+
+        # Path entry across the top
+        path_row = ttk.Frame(parent)
+        path_row.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 6))
+        path_row.columnconfigure(0, weight=1)
+        mode_combo = ttk.Combobox(
+            path_row,
+            textvariable=self.auto_mode,
+            state="readonly",
+            values=["Acceleration", "Skidpad", "Auto X", "Endurance"],
+            width=14,
+            font=("Arial", 11),
+        )
+        mode_combo.grid(row=0, column=0, sticky="w")
+        mode_combo.bind("<<ComboboxSelected>>", self.on_auto_mode_change)
+
+        self.auto_mode_files = {
+            "Acceleration": "Acceleration.csv",
+            "Skidpad": "SkidPad.csv",
+            "Auto X": "Auto_X.csv",
+            "Endurance": "Endurance.csv",
+        }
+
+        ttk.Entry(
+            path_row,
+            textvariable=self.auto_path,
+            font=("Arial", 11),
+        ).grid(row=0, column=1, sticky="ew", padx=(10, 0))
+
+        # Left side: time centered + buttons at the bottom
+        left_panel = ttk.Frame(parent)
+        left_panel.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        left_panel.rowconfigure(0, weight=1)
+        left_panel.rowconfigure(1, weight=0)
+        left_panel.rowconfigure(2, weight=1)
+        left_panel.rowconfigure(3, weight=0)
+        left_panel.columnconfigure(0, weight=1)
+
+        time_block = ttk.Frame(left_panel)
+        time_block.grid(row=1, column=0)
+        ttk.Label(time_block, text="Time", font=("Arial", 12, "bold")).pack()
+        ttk.Label(
+            time_block,
+            textvariable=self.auto_time,
+            font=("Arial", 22, "bold"),
+            foreground="blue",
+        ).pack()
+
+        btn_row = ttk.Frame(left_panel)
+        btn_row.grid(row=3, column=0, sticky="s", pady=(10, 0))
+        self.auto_start_button = ttk.Button(
+            btn_row, text="Start", width=10, command=self.start_auto
+        )
+        self.auto_start_button.pack(side="left", padx=(0, 10))
+        ttk.Button(btn_row, text="Stop", width=10, command=self.stop_auto).pack(side="left", padx=(0, 10))
+        ttk.Button(btn_row, text="Reset", width=10, command=self.reset_auto).pack(side="left")
+
+        # Right side: two bars (Throttle + RPM)
+        right_panel = ttk.Frame(parent)
+        right_panel.grid(row=1, column=1, sticky="n", padx=10, pady=(0, 10))
+
+        bars_row = ttk.Frame(right_panel)
+        bars_row.pack(anchor="n")
+
+        throttle_frame = ttk.Frame(bars_row)
+        throttle_frame.pack(side="left", padx=(0, 20))
+        ttk.Label(throttle_frame, text="Torque", font=("Arial", 10, "bold")).pack(pady=(0, 6))
+        self._create_solid_bar(throttle_frame, self.auto_torque, 100)
+
+        rpm_bar_frame = ttk.Frame(bars_row)
+        rpm_bar_frame.pack(side="left")
+        ttk.Label(rpm_bar_frame, text="RPM", font=("Arial", 10, "bold")).pack(pady=(0, 6))
+        self._create_solid_bar(rpm_bar_frame, self.auto_rpm, 20000)
+
+    def _create_solid_bar(self, parent, value_var, max_value):
+        canvas_width, canvas_height = self.rpm_canvas_size
+        canvas = tk.Canvas(
+            parent,
+            width=canvas_width,
+            height=canvas_height,
+            highlightthickness=0,
+            bg="#e6e6e6",
+        )
+        canvas.pack()
+        for y in range(canvas_height):
+            canvas.create_line(0, y, canvas_width, y, fill="blue")
+        mask_id = canvas.create_rectangle(
+            0,
+            0,
+            canvas_width,
+            canvas_height,
+            fill="#e6e6e6",
+            outline="",
+        )
+        self.auto_bar_canvases.append((canvas, mask_id, value_var, max_value))
+
+    def load_auto_csv(self, path):
+        if not path:
+            return []
+
+        if not os.path.isabs(path):
+            base_dir = os.path.join(os.getcwd(), "database")
+            candidate = os.path.join(base_dir, path)
+            if os.path.exists(candidate):
+                path = candidate
+            else:
+                path = os.path.join(os.getcwd(), path)
+
+        if not os.path.exists(path):
+            print(f"CSV not found: {path}")
+            return []
+
+        data = []
+        with open(path, "r", newline="") as f:
+            reader = csv.reader(f, delimiter=";")
+            rows = list(reader)
+
+        if not rows:
+            return []
+
+        header = rows[0]
+        if len(header) < 2:
+            return []
+
+        time_idx = 0
+        torque_idx = 1
+
+        for row in rows[1:]:
+            if len(row) < 2:
+                continue
+            try:
+                t = float(row[time_idx])
+                v = float(row[torque_idx])
+            except ValueError:
+                continue
+            data.append((t, v))
+
+        if not data:
+            return []
+
+        t0 = data[0][0]
+        values = [v for _, v in data]
+        max_v = max(values) if values else 0.0
+        scale = 0.1 if max_v > 100.0 else 1.0
+
+        normalized = []
+        for t, v in data:
+            torque = v * scale
+            if torque < 0:
+                torque = 0
+            if torque > 100:
+                torque = 100
+            normalized.append((t - t0, torque))
+
+        return normalized
+
+    def start_auto(self):
+        if self.auto_running:
+            return
+        if not self.auto_paused:
+            self.auto_data = self.load_auto_csv(self.auto_path.get())
+            if not self.auto_data:
+                self.auto_max_time = "00:00"
+                self.auto_time.set("00:00/00:00")
+                return
+            self.auto_index = 0
+            self.auto_elapsed_offset = 0.0
+        elif not self.auto_data:
+            self.auto_data = self.load_auto_csv(self.auto_path.get())
+            if not self.auto_data:
+                self.auto_max_time = "00:00"
+                self.auto_time.set("00:00/00:00")
+                return
+
+        if self.auto_data:
+            self.auto_max_time = self._format_time(self.auto_data[-1][0])
+
+        self.auto_running = True
+        self.auto_paused = False
+        self.auto_start_time = time.monotonic() - self.auto_elapsed_offset
+        if self.auto_index < len(self.auto_data):
+            self.auto_torque.set(self.auto_data[self.auto_index][1])
+        self.update_display()
+        self._update_auto_start_label()
+        self.on_auto_mode_change()
+
+    def on_auto_mode_change(self, _event=None):
+        filename = self.auto_mode_files.get(self.auto_mode.get())
+        if filename:
+            self.auto_path.set(filename)
+        self._schedule_auto_step()
+
+    def stop_auto(self):
+        if self.auto_after_id is not None:
+            self.root.after_cancel(self.auto_after_id)
+            self.auto_after_id = None
+        if self.auto_running and self.auto_start_time is not None:
+            self.auto_elapsed_offset = time.monotonic() - self.auto_start_time
+        self.auto_running = False
+        self.auto_paused = True
+        self.auto_start_time = None
+        self._update_auto_start_label()
+
+    def _schedule_auto_step(self):
+        if not self.auto_running:
+            return
+
+        elapsed = time.monotonic() - self.auto_start_time
+        current_time = self._format_time(elapsed)
+        self.auto_time.set(f"{current_time}/{self.auto_max_time}")
+
+        while self.auto_index < len(self.auto_data) and self.auto_data[self.auto_index][0] <= elapsed:
+            torque = self.auto_data[self.auto_index][1]
+            self.auto_torque.set(torque)
+            self.auto_index += 1
+
+        self.update_display()
+
+        if self.auto_index >= len(self.auto_data):
+            self.reset_auto()
+            return
+
+        next_t = self.auto_data[self.auto_index][0]
+        delay_ms = max(1, int((next_t - elapsed) * 1000))
+        self.auto_after_id = self.root.after(delay_ms, self._schedule_auto_step)
+
+    def reset_auto(self):
+        if self.auto_after_id is not None:
+            self.root.after_cancel(self.auto_after_id)
+            self.auto_after_id = None
+        self.auto_running = False
+        self.auto_paused = False
+        self.auto_index = 0
+        self.auto_elapsed_offset = 0.0
+        self.auto_start_time = None
+        self.auto_torque.set(0.0)
+        self.auto_max_time = "00:00"
+        self.auto_time.set("00:00/00:00")
+        self.update_display()
+        self._update_auto_start_label()
+
+    def _format_time(self, seconds):
+        mins = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{mins:02d}:{secs:02d}"
+
+    def _update_auto_start_label(self):
+        if hasattr(self, "auto_start_button") and self.auto_start_button is not None:
+            label = "Resume" if self.auto_paused else "Start"
+            self.auto_start_button.configure(text=label)
 
     def set_input_voltage(self, volts):
         """Update the input voltage display. Expects a number (float or int).
@@ -408,8 +755,25 @@ class TorqueVectoringUI:
 
     def update_display(self):
         """Update display and publish to ROS2"""
+        if self.left_rpm_valid:
+            self.left_rpm_display.set(f"{self.left_motor_rpm.get():5d}")
+        else:
+            self.left_rpm_display.set("--")
+        self._update_bar_masks(self.rpm_canvases)
+        self._update_bar_masks(self.auto_bar_canvases)
         if ROS2_AVAILABLE and self.node:
             self.pub_left_torque.publish(Float32(data=self.left_torque.get()))
+
+    def _update_bar_masks(self, bar_list):
+        canvas_width, canvas_height = self.rpm_canvas_size
+        for canvas, mask_id, value_var, max_value in bar_list:
+            value = int(value_var.get())
+            if value < 0:
+                value = 0
+            if value > max_value:
+                value = max_value
+            empty_height = int(canvas_height * (1 - (value / max_value if max_value else 0.0)))
+            canvas.coords(mask_id, 0, 0, canvas_width, empty_height)
 
     def toggle_switch(self, var):
         var.set(not var.get())
@@ -428,6 +792,14 @@ class TorqueVectoringUI:
             text="ON" if self.r2d_switch.get() else "OFF",
             foreground="green" if self.r2d_switch.get() else "red",
         )
+
+        all_on = (
+            self.shutdown_switch.get()
+            and self.ignition_switch.get()
+            and self.r2d_switch.get()
+        )
+        if hasattr(self, "auto_start_button") and self.auto_start_button is not None:
+            self.auto_start_button.configure(state="normal" if all_on else "disabled")
 
     def send_switch_status(self):
         if self.bus is None:
@@ -502,17 +874,27 @@ class TorqueVectoringUI:
         return (packet_id << 5) | node_id
 
     def send_torques(self):
-        """Send current slider value via CAN"""
+        """Se   nd current slider value via CAN"""
         if not (self.shutdown_switch.get() and self.ignition_switch.get() and self.r2d_switch.get()):
             return
+        current_tab = self.accel_notebook.index("current")
+        auto_tab_index = self.accel_notebook.index(self.auto_tab)
+
+        if current_tab == auto_tab_index:
+            if not self.auto_running:
+                return
+            torque_value = self.auto_torque.get()
+        else:
+            torque_value = self.left_torque.get()
+
         # Get Node ID and calculate CAN ID for Set Current (0x05)
         left_node = int(self.left_node_id.get())
-        
+
         left_can_id = self.node_id_to_can_id(left_node, self.SET_CURRENT_PACKET_ID)
-        
+
         print(f"Left: Node ID {left_node} -> CAN ID {hex(left_can_id)}")
-        
-        self.send_can_message(self.left_torque.get(), left_can_id)
+
+        self.send_can_message(torque_value, left_can_id)
 
     def schedule_torque_send(self):
         self.send_torques()
@@ -525,6 +907,8 @@ class TorqueVectoringUI:
             self.root.after_cancel(self.torque_after_id)
         if self.switch_after_id is not None:
             self.root.after_cancel(self.switch_after_id)
+        if self.auto_after_id is not None:
+            self.root.after_cancel(self.auto_after_id)
         self.receiving = False
         if self.receive_thread:
             self.receive_thread.join(timeout=1)
